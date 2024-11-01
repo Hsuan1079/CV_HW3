@@ -3,10 +3,8 @@ import random
 import numpy as np
 import cv2
 
-
-    
 def sift(img):
-    # chage img to gray scale
+    # Get the key points and descriptors
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     sift = cv2.SIFT_create()
     kp, des = sift.detectAndCompute(img, None)
@@ -32,7 +30,7 @@ def matching_features(des1, des2):
     
     return matches
 
-def Draw_matches(matches,img1,img2, kp1, kp2):
+def Draw_matches(matches, img1, img2, kp1, kp2):
     # Draw the matches linking the two images
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
@@ -53,31 +51,26 @@ def Draw_matches(matches,img1,img2, kp1, kp2):
     # Save the image
     cv2.imwrite(os.path.join('output', 'matches.jpg'), img_matches)
     
-def solve_homography(p1, p2):
+def find_homography(p1, p2):
     # compute the homography matrix
     A = []
-    for i in range(len(p1)):
-            x, y = p1[i][0], p1[i][1]
-            x_prime, y_prime = p2[i][0], p2[i][1]
-
-            A.append([-x, -y, -1, 0, 0, 0, x*x_prime, y*x_prime, x_prime])
-            A.append([0, 0, 0, -x, -y, -1, x*y_prime, y*y_prime, y_prime])
-
+    for (x, y), (xp, yp) in zip(p1, p2):
+        A.append([-x, -y, -1, 0, 0, 0, x * xp, y * xp, xp])
+        A.append([0, 0, 0, -x, -y, -1, x * yp, y * yp, yp])
     A = np.array(A)
 
-    # 對 A 進行 SVD 分解
+    # Apply SVD
     U, S, Vt = np.linalg.svd(A)
-    H = Vt[-1].reshape(3, 3)  # H 是 V 的最後一行
-
-    # 將 H 正規化，使 H[2,2] = 1
-    H = H / H[2, 2]
+    H = Vt[-1].reshape(3, 3)
+    # Normalize H
+    H = H / H[-1, -1]
 
     return H
     
-def homomat(kp1,kp2,matches):
+def homomat(kp1, kp2, matches):
+    # RANSAC to find homography matrix H
     pts1 = np.float32([kp1[i] for (i,_)in matches])
     pts2 = np.float32([kp2[i] for (_,i) in matches])
-    
 
     num = np.shape(pts1)[0]
     coord_1 = np.zeros((num, 3), dtype=float)
@@ -86,20 +79,24 @@ def homomat(kp1,kp2,matches):
         coord_1[i] = np.array([pts1[i][0], pts1[i][1], 1])
         coord_2[i] = np.array([pts2[i][0], pts2[i][1], 1])
     
-    S = 4
-    N = 2000
+    S = 4 # at least 4 samples
+    N = 2000 # iterate for N times
     best_inliers = 0
     best_H = np.zeros((3,3), dtype=float)
     threshold = 5
 
-    for i in range(N):
+    # get the best homography matrix with smallest number of outliers
+    for _ in range(N):
+        # 1. sample S correspondences from the feature matching results
         inliners = 0
         sampleidx = np.random.choice(num, S, replace=False) # sample S index of points
         p1_s = pts1[sampleidx]
         p2_s = pts2[sampleidx]
 
-        H = solve_homography(p1_s, p2_s)
+        # 2. compute the homography matrix based on these sampled correspondences
+        H = find_homography(p1_s, p2_s)
 
+        # 3. check the number of inliers/outliers by a threshold
         for j in range(num):
             mapped_point = np.dot(H, coord_1[j])
             mapped_point /= mapped_point[2]
@@ -111,53 +108,55 @@ def homomat(kp1,kp2,matches):
         if inliners > best_inliers:
             best_inliers = inliners
             best_H = H
-        
+    
     return best_H
 
-
 def warp(image1, image2, H):
-
-    h1, w1, h2, w2 = image1.shape[0], image1.shape[1], image2.shape[0], image2.shape[1]
+    # Combine 2 image
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
     inv_H = np.linalg.inv(H)
-    result_image = np.zeros((h1, w1 + w2, 3),dtype=np.uint8)
+    stitch_img = np.zeros((max(h1, h2), w1 + w2, 3), dtype=np.uint8)
 
-    for i in range(h2): 
-        for j in range(w1 + w2):
-
+    # Applying inv(H) on image 1
+    for i in range(stitch_img.shape[0]):
+        for j in range(stitch_img.shape[1]):
+            # i for height, j for width
             coord2 = np.array([j, i, 1])
             coord1 = inv_H @ coord2
-            coord1[0] /= coord1[2]
-            coord1[1] /= coord1[2]
+            coord1 /= coord1[2]
             coord1 = np.around(coord1[:2])
-            new_i, new_j = int(coord1[0]), int(coord1[1]) 
-            if new_i>=0 and new_j>=0 and new_i<w1 and new_j<h1: 
-                result_image[i][j] = image1[new_j][new_i] 
+            new_j, new_i = int(coord1[0]), int(coord1[1]) 
+            if 0 <= new_i < h1 and 0 <= new_j < w1:
+                stitch_img[i][j] = image1[new_i][new_j]
     
-    result_image[0:h2, 0:w2] = image2
-    return result_image
+    stitch_img[0:h2, 0:w2] = image2
+    
+    return stitch_img
 
 def image_stitching(img1, img2):
-    # Get the key points and descriptors
+    # print("1. Interest points detection & feature description by SIFT")
     kp1, des1 = sift(img2)
     kp2, des2 = sift(img1)
-
+    # print("2. Feature matching by SIFT features")
     matches = matching_features(des1, des2)
-    # Match the SIFT descriptors
-    Draw_matches(matches,img2,img1,kp1,kp2)
-
-    # Find the homography matrix
-    H = homomat(kp1,kp2,matches)
+    Draw_matches(matches, img2, img1, kp1, kp2)
+    # print("3. RANSAC to find homography matrix H")
+    H = homomat(kp1, kp2, matches)
+    # print("4. Warp image to create panoramic image")
     result_image = warp(img2, img1,H)
 
     return result_image
 
-
-
 if __name__ == '__main__':
     # Read the images from data folder
-    img1 = cv2.imread('data/TV1.JPG')
-    img2 = cv2.imread('data/TV2.JPG')
+    folder = 'my_data'
+    prefix = 'Daikakuji'
+    img1 = cv2.imread(os.path.join(folder, f'{prefix}1.jpg'))
+    img2 = cv2.imread(os.path.join(folder, f'{prefix}2.jpg'))
     result_image = image_stitching(img1, img2)
     cv2.imshow('Result Image', result_image)
-    cv2.imwrite(os.path.join('output', 'result.jpg'), result_image)
+    cv2.waitKey(0) 
+    cv2.destroyAllWindows()
+    cv2.imwrite(os.path.join('output', f'{prefix}_result.jpg'), result_image)
     
