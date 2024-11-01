@@ -2,6 +2,7 @@ import os
 import random
 import numpy as np
 import cv2
+import test
 
 def sift(img):
     # Get the key points and descriptors
@@ -35,8 +36,8 @@ def Draw_matches(matches, img1, img2, kp1, kp2):
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
     img_matches = np.zeros((max(h1, h2), w1 + w2, 3), np.uint8)
-    img_matches[:h1, :w1] = img1
-    img_matches[:h2, w1:] = img2
+    img_matches[:h2, :w1] = img2
+    img_matches[:h1, w1:] = img1
     for i, j in matches:
         pt1 = (int(kp1[i][0]), int(kp1[i][1]))
         pt2 = (int(kp2[j][0]) + w1, int(kp2[j][1]))
@@ -111,52 +112,94 @@ def homomat(kp1, kp2, matches):
     
     return best_H
 
-def warp(image1, image2, H):
-    # Combine 2 image
+def create_mask(img1, img2,version):
+    # Creates the mask using query and train images for blending the images,
+    # using a gaussian smoothing window/kernel
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
-    inv_H = np.linalg.inv(H)
-    stitch_img = np.zeros((max(h1, h2), w1 + w2, 3), dtype=np.uint8)
 
-    # Applying inv(H) on image 1
-    for i in range(stitch_img.shape[0]):
-        for j in range(stitch_img.shape[1]):
-            # i for height, j for width
-            coord2 = np.array([j, i, 1])
-            coord1 = inv_H @ coord2
-            coord1 /= coord1[2]
-            coord1 = np.around(coord1[:2])
-            new_j, new_i = int(coord1[0]), int(coord1[1]) 
-            if 0 <= new_i < h1 and 0 <= new_j < w1:
-                stitch_img[i][j] = image1[new_i][new_j]
+    lowest_width = min(w1, w2)
+    smoothing_window_percent = 0.10 # consider increasing or decreasing[0.00, 1.00] 
+    smoothing_window_size = max(100, min(smoothing_window_percent * lowest_width, 1000))
+    offset = int(smoothing_window_size / 2)
+    barrier = w1 - offset
+
+    mask = np.zeros((max(h1, h2), w1 + w2))
+    if version == "left_image":
+        mask[:, barrier - offset : barrier + offset] = np.tile(
+            np.linspace(1, 0, 2 * offset).T, (max(h1, h2), 1)
+        )
+        mask[:, : barrier - offset] = 1
+    elif version == "right_image":
+        mask[:, barrier - offset : barrier + offset] = np.tile(
+            np.linspace(0, 1, 2 * offset).T, (max(h1, h2), 1)
+        )
+        mask[:, barrier + offset :] = 1
     
-    stitch_img[0:h2, 0:w2] = image2
+    mask_rgb = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=mask.dtype)
+    mask_rgb[:, :, 0] = mask
+    mask_rgb[:, :, 1] = mask
+    mask_rgb[:, :, 2] = mask
     
-    return stitch_img
+    return mask_rgb
+
+def warp(img, H, output_size):
+    height, width = output_size
+    warped_image = np.zeros((height, width, 3), dtype=img.dtype)
+
+    inv_H = np.linalg.inv(H)
+
+    for i in range(height):
+        for j in range(width):
+            original_coord = inv_H @ np.array([j, i, 1]) 
+            original_coord /= original_coord[2] 
+            new_x, new_y = int(original_coord[0]), int(original_coord[1])
+            if 0 <= new_x < img.shape[1] and 0 <= new_y < img.shape[0]:
+                warped_image[i, j] = img[new_y, new_x]
+
+    return warped_image
+
+def blending_smoothing(img1, img2, H):
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
+    height = max(h1, h2)
+    width = w1 + w2
+
+    panorama1 = np.zeros((height, width, 3))
+    mask1 = create_mask(img1, img2, version="left_image")
+    panorama1[0 : h1, 0 : w1, :] = img1
+    panorama1 *= mask1
+    mask2 = create_mask(img1, img2, version="right_image")
+    panorama2 = warp(img2, H, (height, width)) * mask2
+    result = panorama1 + panorama2
+
+    # remove extra blackspace
+    rows, cols = np.where(result[:, :, 0] != 0)
+    min_row, max_row = min(rows), max(rows) + 1
+    min_col, max_col = min(cols), max(cols) + 1
+
+    result = result[min_row:max_row, min_col:max_col, :]
+    return result
 
 def image_stitching(img1, img2):
-    # print("1. Interest points detection & feature description by SIFT")
+    print("1. Interest points detection & feature description by SIFT")
     kp1, des1 = sift(img2)
     kp2, des2 = sift(img1)
-    # print("2. Feature matching by SIFT features")
+    print("2. Feature matching by SIFT features")
     matches = matching_features(des1, des2)
-    Draw_matches(matches, img2, img1, kp1, kp2)
-    # print("3. RANSAC to find homography matrix H")
+    Draw_matches(matches, img1, img2, kp1, kp2)
+    print("3. RANSAC to find homography matrix H")
     H = homomat(kp1, kp2, matches)
-    # print("4. Warp image to create panoramic image")
-    result_image = warp(img2, img1,H)
+    print("4. Warp image to create panoramic image")
+    result_image = blending_smoothing(img1, img2, H)
 
     return result_image
 
 if __name__ == '__main__':
     # Read the images from data folder
-    folder = 'my_data'
-    prefix = 'Daikakuji'
+    folder = 'data'
+    prefix = 'TV'
     img1 = cv2.imread(os.path.join(folder, f'{prefix}1.jpg'))
     img2 = cv2.imread(os.path.join(folder, f'{prefix}2.jpg'))
     result_image = image_stitching(img1, img2)
-    cv2.imshow('Result Image', result_image)
-    cv2.waitKey(0) 
-    cv2.destroyAllWindows()
     cv2.imwrite(os.path.join('output', f'{prefix}_result.jpg'), result_image)
-    
