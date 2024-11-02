@@ -12,6 +12,23 @@ def sift(img):
     kp = np.float32([i.pt for i in kp])
     return kp, des
 
+def mser(img):
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    mser = cv2.MSER_create()
+    regions, _ = mser.detectRegions(img_gray)
+
+    # Convert MSER regions to keypoints for SIFT descriptor extraction
+    keypoints = []
+    for region in regions:
+        x, y = np.mean(region, axis=0)
+        keypoints.append(cv2.KeyPoint(x=x, y=y, size=1.0))  # Set a fixed size of 1.0
+
+    sift = cv2.SIFT_create()
+    keypoints, descriptors = sift.compute(img_gray, keypoints)
+    keypoints = np.float32([kp.pt for kp in keypoints])
+
+    return keypoints, descriptors
+
 def matching_features(des1, des2):
     # find the first and second best matches
     ratio_dis = 0.75
@@ -36,11 +53,11 @@ def Draw_matches(matches, img1, img2, kp1, kp2):
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
     img_matches = np.zeros((max(h1, h2), w1 + w2, 3), np.uint8)
-    img_matches[:h2, :w1] = img2
-    img_matches[:h1, w1:] = img1
+    img_matches[:h1, :w1] = img1
+    img_matches[:h2, w1:] = img2
     for i, j in matches:
-        pt1 = (int(kp1[i][0]), int(kp1[i][1]))
-        pt2 = (int(kp2[j][0]) + w1, int(kp2[j][1]))
+        pt1 = (int(kp1[i][0]) + w1, int(kp1[i][1]))
+        pt2 = (int(kp2[j][0]), int(kp2[j][1]))
 
         # draw a circle in the keypoints
         cv2.circle(img_matches, pt1, 5, (0, 0, 255), 1)
@@ -51,7 +68,29 @@ def Draw_matches(matches, img1, img2, kp1, kp2):
 
     # Save the image
     cv2.imwrite(os.path.join('output', 'matches.jpg'), img_matches)
-    
+
+def Draw_matches_mser(matches, img1, img2, kp1, kp2):
+    # Draw the matches linking the two images
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
+    img_matches = np.zeros((max(h1, h2), w1 + w2, 3), np.uint8)
+    img_matches[:h1, :w1] = img1
+    img_matches[:h2, w1:] = img2
+    for i, j in matches:
+        pt1 = (int(kp1[i][0]) + w1, int(kp1[i][1]))
+        pt2 = (int(kp2[j][0]), int(kp2[j][1]))
+
+        # draw a circle in the keypoints
+        cv2.circle(img_matches, pt1, 5, (0, 0, 255), 1)
+        cv2.circle(img_matches, pt2, 5, (0, 255, 0), 1)
+
+        # draw a line between the keypoints
+        cv2.line(img_matches, pt1, pt2, (255, 0, 0), 1)
+
+    # Save the image
+    cv2.imwrite(os.path.join('output', 'matches_mser.jpg'), img_matches)
+
+
 def find_homography(p1, p2):
     # compute the homography matrix
     A = []
@@ -195,11 +234,27 @@ def image_stitching(img1, img2):
 
     return result_image
 
+def image_stitching_mser(img1, img2):
+    print("1. Interest points detection & feature description by SIFT")
+    kp1, des1 = mser(img2)
+    kp2, des2 = mser(img1)
+    print("2. Feature matching by SIFT features")
+    matches = matching_features(des1, des2)
+    Draw_matches_mser(matches, img1, img2, kp1, kp2)
+    print("3. RANSAC to find homography matrix H")
+    H = homomat(kp1, kp2, matches)
+    print("4. Warp image to create panoramic image")
+    result_image = blending_smoothing(img1, img2, H)
+
+    return result_image
+
 if __name__ == '__main__':
     # Read the images from data folder
     folder = 'data'
-    prefix = 'TV'
+    prefix = 'hill'
     img1 = cv2.imread(os.path.join(folder, f'{prefix}1.jpg'))
     img2 = cv2.imread(os.path.join(folder, f'{prefix}2.jpg'))
     result_image = image_stitching(img1, img2)
+    result_image_mser = image_stitching_mser(img1, img2)
     cv2.imwrite(os.path.join('output', f'{prefix}_result.jpg'), result_image)
+    cv2.imwrite(os.path.join('output', f'{prefix}_mser_result.jpg'), result_image_mser)
