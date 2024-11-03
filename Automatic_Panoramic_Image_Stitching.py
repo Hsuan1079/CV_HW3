@@ -1,8 +1,6 @@
 import os
-import random
-import numpy as np
 import cv2
-import test
+import numpy as np
 
 def sift(img):
     # Get the key points and descriptors
@@ -250,8 +248,8 @@ def image_stitching_mser(img1, img2):
 
 if __name__ == '__main__':
     # Read the images from data folder
-    folder = 'data'
-    prefix = 'hill'
+    folder = 'my_data'
+    prefix = 'Daikakuji'
     img1 = cv2.imread(os.path.join(folder, f'{prefix}1.jpg'))
     img2 = cv2.imread(os.path.join(folder, f'{prefix}2.jpg'))
     result_image = image_stitching(img1, img2)
